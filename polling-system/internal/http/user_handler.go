@@ -88,3 +88,14 @@ func (h *Handler) handleDeactivateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+func (h *Handler) handleMyVotes(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromCtx(r)
+
+	votes, err := h.voteSvc.UserVotes(r.Context(), userID)
+	if err != nil {
+		errorResponse(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, votes)
+}
