@@ -334,6 +334,13 @@ func (r *testVoteRepo) GetPollStatus(ctx context.Context, pollID int64) (string,
 	}
 	return p.Status, nil
 }
+func (r *testVoteRepo) GetPollWindow(ctx context.Context, pollID int64) (*time.Time, *time.Time, error) {
+	return nil, nil, nil
+}
+func (r *testVoteRepo) GetVotesByUser(ctx context.Context, userID int64) ([]vote.UserVote, error) {
+	// для router-тестов история голосов не важна
+	return []vote.UserVote{}, nil
+}
 
 func setupServer(t *testing.T) (*httptest.Server, *testUserRepo, *testPollRepo, *testVoteRepo, func()) {
 	t.Helper()
