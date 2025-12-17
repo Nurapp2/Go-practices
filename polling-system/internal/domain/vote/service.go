@@ -2,138 +2,173 @@ package vote
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"sync"
+	"testing"
 	"time"
 )
 
-var (
-	ErrAlreadyVoted    = errors.New("user already voted in this poll")
-	ErrPollNotActive   = errors.New("poll is not active")
-	ErrOptionNotInPoll = errors.New("option not in poll")
-	ErrPollNotFound    = errors.New("poll not found")
-)
-
-type Service struct {
-	repo     Repository
-	cacheTTL time.Duration
-	cache    map[int64]cachedResult
-	mu       sync.RWMutex
+type memoryVoteRepo struct {
+	mu            sync.Mutex
+	votes         map[int64]map[int64]int64
+	userVotes     map[int64]map[int64]bool
+	aggregated    map[int64]map[int64]int64
+	pollStatus    map[int64]string
+	countCalls    int
+	aggregatedHit int
 }
 
-type cachedResult struct {
-	results   []Result
-	total     int64
-	expiresAt time.Time
-}
-
-func NewService(repo Repository) *Service {
-	return &Service{
-		repo:     repo,
-		cacheTTL: 10 * time.Second,
-		cache:    make(map[int64]cachedResult),
+func newMemoryVoteRepo() *memoryVoteRepo {
+	return &memoryVoteRepo{
+		votes:      make(map[int64]map[int64]int64),
+		userVotes:  make(map[int64]map[int64]bool),
+		aggregated: make(map[int64]map[int64]int64),
+		pollStatus: make(map[int64]string),
 	}
 }
 
-func (s *Service) Vote(ctx context.Context, pollID, optionID, userID int64) error {
-	status, err := s.repo.GetPollStatus(ctx, pollID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrPollNotFound
-		}
-		return err
+func (r *memoryVoteRepo) Create(ctx context.Context, v *Vote) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.userVotes[v.PollID] == nil {
+		r.userVotes[v.PollID] = make(map[int64]bool)
 	}
-	if status != "active" {
-		return ErrPollNotActive
+	if r.userVotes[v.PollID][v.UserID] {
+		return ErrAlreadyVoted
 	}
-
-	v := &Vote{
-		PollID:   pollID,
-		OptionID: optionID,
-		UserID:   userID,
+	r.userVotes[v.PollID][v.UserID] = true
+	if r.votes[v.PollID] == nil {
+		r.votes[v.PollID] = make(map[int64]int64)
 	}
-
-	err = s.repo.Create(ctx, v)
-	if err != nil {
-		if errors.Is(err, ErrAlreadyVoted) {
-			return ErrAlreadyVoted
-		}
-		if errors.Is(err, ErrOptionNotInPoll) {
-			return ErrOptionNotInPoll
-		}
-		if errors.Is(err, ErrPollNotFound) {
-			return ErrPollNotFound
-		}
-		return err
-	}
-
-	s.invalidateCache(pollID)
+	r.votes[v.PollID][v.OptionID]++
 	return nil
 }
 
-type Result struct {
-	OptionID   int64   `json:"option_id"`
-	Votes      int64   `json:"votes"`
-	Percentage float64 `json:"percentage"`
+func (r *memoryVoteRepo) CountByPoll(ctx context.Context, pollID int64) (map[int64]int64, int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.countCalls++
+	res := make(map[int64]int64)
+	var total int64
+	for opt, c := range r.votes[pollID] {
+		res[opt] = c
+		total += c
+	}
+	return res, total, nil
 }
 
-func (s *Service) Results(ctx context.Context, pollID int64) ([]Result, int64, error) {
-	if cached, ok := s.getCached(pollID); ok {
-		return cached.results, cached.total, nil
+func (r *memoryVoteRepo) AggregatedByPoll(ctx context.Context, pollID int64) (map[int64]int64, int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.aggregatedHit++
+	res := make(map[int64]int64)
+	var total int64
+	for opt, c := range r.aggregated[pollID] {
+		res[opt] = c
+		total += c
+	}
+	return res, total, nil
+}
+
+func (r *memoryVoteRepo) IncrementAggregated(ctx context.Context, pollID, optionID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.aggregated[pollID] == nil {
+		r.aggregated[pollID] = make(map[int64]int64)
+	}
+	r.aggregated[pollID][optionID]++
+	return nil
+}
+
+func (r *memoryVoteRepo) GetPollStatus(ctx context.Context, pollID int64) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if status, ok := r.pollStatus[pollID]; ok {
+		return status, nil
 	}
 
-	counts, total, err := s.repo.AggregatedByPoll(ctx, pollID)
+	return "active", nil
+}
+func (r *memoryVoteRepo) GetPollWindow(ctx context.Context, pollID int64) (*time.Time, *time.Time, error) {
+	return nil, nil, nil
+}
+func (r *memoryVoteRepo) GetVotesByUser(
+	ctx context.Context,
+	userID int64,
+) ([]UserVote, error) {
+	return []UserVote{}, nil
+}
+
+func TestVoteIdempotencyAndCache(t *testing.T) {
+	repo := newMemoryVoteRepo()
+	svc := NewService(repo)
+	svc.cacheTTL = time.Hour
+	ctx := context.Background()
+
+	if err := svc.Vote(ctx, 1, 10, 42); err != nil {
+		t.Fatalf("expected first vote ok, got %v", err)
+	}
+	if !errors.Is(svc.Vote(ctx, 1, 10, 42), ErrAlreadyVoted) {
+		t.Fatalf("expected duplicate vote error")
+	}
+
+	results, total, err := svc.Results(ctx, 1)
 	if err != nil {
-		return nil, 0, err
+		t.Fatalf("results error: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected total 1, got %d", total)
+	}
+	if len(results) != 1 || results[0].Percentage != 100 {
+		t.Fatalf("unexpected results %+v", results)
+	}
+	if repo.countCalls != 1 {
+		t.Fatalf("expected one count call, got %d", repo.countCalls)
 	}
 
-	if len(counts) == 0 && total == 0 {
-		counts, total, err = s.repo.CountByPoll(ctx, pollID)
-		if err != nil {
-			return nil, 0, err
-		}
+	if _, _, err := svc.Results(ctx, 1); err != nil {
+		t.Fatalf("cache lookup failed: %v", err)
 	}
-
-	results := make([]Result, 0, len(counts))
-	for optionID, c := range counts {
-		var p float64
-		if total > 0 {
-			p = float64(c) * 100.0 / float64(total)
-		}
-		results = append(results, Result{
-			OptionID:   optionID,
-			Votes:      c,
-			Percentage: p,
-		})
-	}
-
-	s.setCached(pollID, results, total)
-	return results, total, nil
-}
-
-func (s *Service) getCached(pollID int64) (cachedResult, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	res, ok := s.cache[pollID]
-	if !ok || time.Now().After(res.expiresAt) {
-		return cachedResult{}, false
-	}
-	return res, true
-}
-
-func (s *Service) setCached(pollID int64, results []Result, total int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cache[pollID] = cachedResult{
-		results:   results,
-		total:     total,
-		expiresAt: time.Now().Add(s.cacheTTL),
+	if repo.countCalls != 1 {
+		t.Fatalf("expected cached results to be used, count calls %d", repo.countCalls)
 	}
 }
 
-func (s *Service) invalidateCache(pollID int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.cache, pollID)
+func TestVoteRejectsWhenPollNotActive(t *testing.T) {
+	repo := newMemoryVoteRepo()
+	repo.pollStatus[1] = "closed"
+	svc := NewService(repo)
+	ctx := context.Background()
+
+	err := svc.Vote(ctx, 1, 10, 1)
+	if err == nil || err.Error() != "poll_closed" {
+		t.Fatalf("expected poll_closed error, got %v", err)
+	}
+}
+func TestVoteRejectsDuplicateVote(t *testing.T) {
+	repo := newMemoryVoteRepo()
+	svc := NewService(repo)
+	ctx := context.Background()
+
+	err := svc.Vote(ctx, 1, 10, 100)
+	if err != nil {
+		t.Fatalf("expected first vote to succeed, got %v", err)
+	}
+
+	err = svc.Vote(ctx, 1, 11, 100)
+	if !errors.Is(err, ErrAlreadyVoted) {
+		t.Fatalf("expected ErrAlreadyVoted, got %v", err)
+	}
+}
+func TestUserVotesEmpty(t *testing.T) {
+	repo := newMemoryVoteRepo()
+	svc := NewService(repo)
+
+	votes, err := svc.UserVotes(context.Background(), 123)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(votes) != 0 {
+		t.Fatalf("expected empty votes, got %v", votes)
+	}
 }
