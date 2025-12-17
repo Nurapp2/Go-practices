@@ -143,3 +143,14 @@ func TestPollValidationAndStatus(t *testing.T) {
 		t.Fatalf("expected status update success: %v", err)
 	}
 }
+func TestUpdateNonExistingPoll(t *testing.T) {
+	repo := newMemoryPollRepo()
+	svc := NewService(repo)
+	ctx := context.Background()
+
+	err := svc.UpdateStatus(ctx, 999, "active")
+	if !errors.Is(err, ErrPollNotFound) {
+		t.Fatalf("expected poll not found error, got %v", err)
+
+	}
+}
