@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -120,4 +121,60 @@ func mapVoteError(err error) error {
 		}
 	}
 	return err
+}
+func (r *VoteRepo) GetPollWindow(
+	ctx context.Context,
+	pollID int64,
+) (*time.Time, *time.Time, error) {
+
+	var startsAt, endsAt sql.NullTime
+
+	err := r.db.QueryRowContext(
+		ctx,
+		`SELECT starts_at, ends_at FROM polls WHERE id = $1`,
+		pollID,
+	).Scan(&startsAt, &endsAt)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var s, e *time.Time
+	if startsAt.Valid {
+		s = &startsAt.Time
+	}
+	if endsAt.Valid {
+		e = &endsAt.Time
+	}
+
+	return s, e, nil
+}
+func (r *VoteRepo) GetVotesByUser(
+	ctx context.Context,
+	userID int64,
+) ([]vote.UserVote, error) {
+
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT poll_id, option_id, created_at
+		 FROM votes
+		 WHERE user_id = $1
+		 ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []vote.UserVote
+	for rows.Next() {
+		var v vote.UserVote
+		if err := rows.Scan(&v.PollID, &v.OptionID, &v.VotedAt); err != nil {
+			return nil, err
+		}
+		res = append(res, v)
+	}
+
+	return res, nil
 }
