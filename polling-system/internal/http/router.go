@@ -74,6 +74,7 @@ func NewRouter(
 			r.Get("/polls/{id}", h.handleGetPoll)
 			r.With(RateLimitVotes(rate.Every(time.Minute/10), 3)).Post("/polls/{id}/vote", h.handleVote)
 			r.Get("/polls/{id}/results", h.handlePollResults)
+			r.Get("/users/me/votes", h.handleMyVotes)
 
 			r.Group(func(r chi.Router) {
 				r.Use(RequireRole("admin"))
