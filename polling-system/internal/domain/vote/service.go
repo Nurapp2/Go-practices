@@ -44,8 +44,29 @@ func (s *Service) Vote(ctx context.Context, pollID, optionID, userID int64) erro
 		}
 		return err
 	}
+	if status == "draft" {
+		return errors.New("poll_not_started")
+	}
+
+	if status == "closed" {
+		return errors.New("poll_closed")
+	}
 	if status != "active" {
 		return ErrPollNotActive
+	}
+	startsAt, endsAt, err := s.repo.GetPollWindow(ctx, pollID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+
+	if startsAt != nil && now.Before(*startsAt) {
+		return errors.New("poll_not_started")
+	}
+
+	if endsAt != nil && now.After(*endsAt) {
+		return errors.New("poll_closed")
 	}
 
 	v := &Vote{
@@ -136,4 +157,7 @@ func (s *Service) invalidateCache(pollID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.cache, pollID)
+}
+func (s *Service) UserVotes(ctx context.Context, userID int64) ([]UserVote, error) {
+	return s.repo.GetVotesByUser(ctx, userID)
 }
